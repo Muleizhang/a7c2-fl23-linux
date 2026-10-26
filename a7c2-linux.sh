@@ -40,6 +40,8 @@ action_title() {
         direct_sound_enable) say '开启原生快门声音' ;; direct_sound_disable) say '关闭快门声音' ;;
         direct_sound_restore) say '恢复原厂快门音效' ;; sound_import) say '转换声音文件（离线）' ;;
         sound_install) say '安装自定义快门声音' ;;
+        vertical_enable) say '开启竖屏显示与 Fn／子菜单显示修正' ;;
+        vertical_disable) say '关闭竖屏显示并撤销显示修正' ;;
         direct_factory_reset|direct_resume_factory) say '恢复原厂功能' ;;
         direct_verify|restore_verify) say '核对重启后的相机状态' ;;
         backup_inspect) say '检查历史备份（离线）' ;; restore) say '使用历史备份回退' ;;
@@ -51,12 +53,17 @@ confirm_write() {
     case $1 in
         setup_all) jq -r 'if .options.fl23 then "  · 启用 FL2 / FL3" else empty end,
             if .options.sound then "  · 开启原生快门声音" else empty end,
+            if .options.vertical then "  · 开启竖屏显示与 Fn／子菜单显示修正" else empty end,
             (.options.looks[]? | "  · 写入自订 \(.slot)：\(.path | split("/") | last)")' <<<"$2" ;;
         direct_looks_import) jq -r '.operations[] | "  · 替换自订 \(.slot)：\(.path | split("/") | last)"' <<<"$2" ;;
         direct_slot_default) jq -r '"  · 自订 \(.slot) 将设为 ST，原配方无法恢复。"' <<<"$2" ;;
         direct_factory_reset|direct_resume_factory) say '  · 移除本项目的修改，自订 1–6 全部设为 ST；原配方无法恢复。' ;;
         restore) say '  · 回到所选备份的状态，可能撤销之后的外观和功能修改。' ;;
     esac
+    if [[ $1 == vertical_* ]] || jq -e '.options.vertical == true' <<<"$2" >/dev/null; then
+        say '竖屏刚接入本脚本，尚未实机验证；会保存开关，断电重开后生效。'
+        say '上游已知显示问题：创意外观页外框偏粗，橙色刻度指针朝向尚未修正。'
+    fi
     say '请确认：相机为 A7C II、固件 2.01，电量至少 50%，供电和数据线稳定。'
     yes '已备份重要数据，并接受本次修改的风险，开始操作？'
 }
@@ -64,10 +71,10 @@ help_text() {
     cat <<EOF
 用法：sh a7c2-linux.sh [setup|doctor|status|continue|usb-help|test|help]
 无参数进入交互菜单；setup 自动下载固定上游、创建本目录 venv 并安装依赖。
-固定版本：$COMMIT。仅支持 ILCE-7CM2 固件 2.01；已在 Fedora 44 x86_64 实机验证。
+固定版本：$COMMIT。仅支持 ILCE-7CM2 固件 2.01；除新增竖屏外已在 Fedora 44 x86_64 实机验证。
 需要 bash、git、jq、flock、Python 3.11 + venv；自动卸载分区需要 udisksctl。
 面向 Debian/Ubuntu、Fedora/RHEL、Arch、openSUSE；其他发行版和硬件组合尚待实测。
-菜单保留 FL2/FL3、A7Look、声音、组合安装和恢复；竖屏仍因上游重写而暂停。
+支持 FL2/FL3、A7Look、声音、竖屏、组合安装和恢复；竖屏已接入，待本脚本实机验证。
 不执行 sudo、不修改系统规则；usb-help 显示管理员准备步骤。
 运行数据全部位于 $BASE，备份和事务不可删除来绕过错误。
 setup/doctor/test 不访问相机；test 运行适配器检查和选定的上游离线测试。
@@ -223,6 +230,7 @@ run_job() {
     ((rc == 0)) || { die "上游已停止；保留 $job，不自动重试写入。"; return "$rc"; }
     if [[ $access == write ]]; then
         say 'USB 读写已结束。若上方提示等待重启：拔线、正常关机、取电池至少 1 分钟，开机检查后选择 15 继续／核对。'
+        if [[ $action == vertical_* ]]; then say '竖屏检查：横握及左右竖握的 Fn 网格、外观选择页、参数调整页，以及拍摄和回放。'; fi
     elif [[ $access == read ]]; then say '本次检查已结束。'; fi
 }
 continue_job() {
@@ -231,7 +239,8 @@ continue_job() {
     action=$(jq -r .action "$CURRENT/request.private.json"); work=$(current_work)
     yes '已按上次操作的提示完成必要的断电重开和机身检查？' || { say '已返回菜单。'; return 0; }
     case $action in
-        setup_all) args=$(jq -c .arguments "$CURRENT/request.private.json"); run_job setup_all "$args" write yes ;;
+        setup_all|vertical_enable|vertical_disable)
+            args=$(jq -c .arguments "$CURRENT/request.private.json"); run_job "$action" "$args" write yes ;;
         direct_factory_reset|direct_resume_factory) run_job direct_factory_reset "$(jq -cn --arg w "$work" '{failed_workspace:$w}')" write yes ;;
         restore|restore_verify) run_job restore_verify "$(jq -cn --arg w "$work" '{workspace:$w}')" read yes ;;
         sound_install)
@@ -264,8 +273,9 @@ menu_action() {
             options='{"fl23":false,"sound":false,"vertical":false,"plugin":false}'
             if yes '启用 FL2/FL3？'; then options=$(jq '.fl23=true' <<<"$options"); fi
             if yes '启用原生快门声？'; then options=$(jq '.sound=true' <<<"$options"); fi
+            if yes '开启竖屏显示（含显示修正，待本脚本实机验证）？'; then options=$(jq '.vertical=true' <<<"$options"); fi
             if yes '同时导入自己的 A7Look？'; then looks; options=$(jq --argjson rows "$LOOKS" '.looks=$rows' <<<"$options"); fi
-            jq -e '.fl23 or .sound or (.looks|length)>0' <<<"$options" >/dev/null || { die '未选择功能。'; return 1; }
+            jq -e '.fl23 or .sound or .vertical or (.looks|length)>0' <<<"$options" >/dev/null || { die '未选择功能。'; return 1; }
             run_job setup_all "$(jq -cn --argjson o "$options" '{options:$o}')" write ;;
         4) run_job direct_fl23_enable '{}' write ;; 5) run_job direct_fl23_disable '{}' write ;;
         6) looks; run_job direct_looks_import "$(jq -cn --argjson rows "$LOOKS" '{operations:$rows}')" write ;;
@@ -292,7 +302,8 @@ menu_action() {
         18) ask '历史备份文件路径：'; file=$(realpath -e -- "$REPLY")
             args=$(jq -cn --arg b "$file" '{backup:$b}'); run_job backup_inspect "$args" offline
             run_job restore "$args" write ;;
-        19) say '上游竖屏功能仍在重写，暂不开放。' ;;
+        19) run_job vertical_enable '{}' write ;;
+        20) run_job vertical_disable '{}' write ;;
         *) die '无效选项。' ;;
     esac
 }
@@ -315,10 +326,13 @@ show_menu() {
  11  恢复原厂音效       12  转换声音（离线）
  13  安装自定义声音
 
+── 竖屏显示（待实机验证）────────────────
+ 19  开启竖屏显示       20  关闭竖屏显示
+
 ── 恢复与帮助 ──────────────────────────
  14  恢复原厂功能       18  使用历史备份回退
  16  查看记录 / 导出诊断
- 17  USB 权限说明       19  竖屏功能状态
+ 17  USB 权限说明
 
   0  退出
 MENU
@@ -332,6 +346,27 @@ self_test() {
     [[ $(current_work) == /test ]]
     printf '%s\n' '{"phase":"SUCCEEDED","result":{"phase":"COMPLETED"}}' > "$CURRENT/status.private.json"
     finished
+    # Route portrait continuations through the same upstream action and original root.
+    (
+        local captured action
+        run_job() { captured=$(jq -cn --arg a "$1" --argjson args "$2" --arg access "$3" --arg c "${4:-no}" '{action:$a,args:$args,access:$access,continuation:$c}'); }
+        menu_action 19
+        jq -e '.action == "vertical_enable" and .access == "write"' <<<"$captured" >/dev/null
+        menu_action 20
+        jq -e '.action == "vertical_disable" and .access == "write"' <<<"$captured" >/dev/null
+        menu_action 3 <<< $'0\n0\n1\n0'
+        jq -e '.action == "setup_all" and .args.options.vertical and (.args.options.fl23|not) and (.args.options.sound|not)' <<<"$captured" >/dev/null
+        for action in vertical_enable vertical_disable; do
+            jq -cn --arg a "$action" '{action:$a,arguments:{workspace:"/original-root"}}' > "$CURRENT/request.private.json"
+            printf '%s\n' '{"workspace":"/original-root/frames-child","phase":"AWAITING_RELOAD"}' > "$CURRENT/result.private.json"
+            printf '%s\n' '{"phase":"SUCCEEDED","result":{"phase":"AWAITING_RELOAD"}}' > "$CURRENT/status.private.json"
+            if finished; then die '等待重启的竖屏任务被当作完成'; exit 1; fi
+            continue_job <<<1
+            jq -e --arg a "$action" '.action == $a and .args.workspace == "/original-root" and .access == "write" and .continuation == "yes"' <<<"$captured" >/dev/null
+            printf '%s\n' '{"phase":"SUCCEEDED","result":{"phase":"LOADED"}}' > "$CURRENT/status.private.json"
+            finished
+        done
+    )
     # Redirect only the test copy of the USB guard to synthetic sysfs/mount data.
     (
         local usb=$temp/usb
@@ -363,6 +398,7 @@ self_test() {
     "$PY" -m pip --isolated install --cache-dir "$BASE/pip-cache" pytest==8.3.5
     # Two integration cases assume Windows APPDATA/driver installation, outside this frontend.
     (cd "$SOURCE" && "$PY" -m pytest -q -p no:cacheprovider dev/desktop/test_allinone.py dev/desktop/test_direct.py dev/desktop/test_integration.py \
+        dev/desktop/test_portrait_action.py dev/desktop/test_portrait_job.py dev/desktop/test_vertical_persistent.py dev/vertical \
         -k 'not frozen_plugin_installs and not unknown_sony_pid_is_reported')
 }
 main() {
@@ -380,7 +416,7 @@ main() {
             [[ -t 0 ]] || { die '菜单需要终端。'; return 1; }
             say 'A7C II Linux · 仅支持 ILCE-7CM2 / 固件 2.01'
             say '相机设为海量存储并连接 USB，输入 1 即可检查连接。'
-            say '已在 Fedora 44 + A7C II 2.01 实机验证；写入功能会在执行前单独确认。'
+            say '除新增竖屏外已在 Fedora 44 + A7C II 2.01 实机验证；写入前会单独确认。'
             while true; do
                 show_menu
                 ask '输入编号：'; [[ $REPLY != 0 ]] || break
